@@ -165,6 +165,31 @@ This will:
    - Requests per second
    - Response time statistics (avg, min, max, median, p95, p99)
 
+### Performance Example
+
+Below is an example performance test using a system with an RTX 4060 mobile GPU:
+
+```
+============================================================
+PERFORMANCE TEST RESULTS
+============================================================
+Total Requests:        100
+Successful Requests:   98
+Failed Requests:       2
+Success Rate:          98.00%
+Total Time:            9.63 seconds
+Requests per Second:   10.38
+
+Response Time Statistics:
+Average:               5925.84ms
+Median:                5452.94ms
+Min:                   2016.95ms
+Max:                   9355.26ms
+95th Percentile:       9300.82ms
+99th Percentile:       9354.48ms
+============================================================
+```
+
 ## Performance Optimization Tips
 
 1. **Use the MediaPipe endpoint** (`/mediapipe`) for better performance compared to MTCNN
@@ -176,6 +201,40 @@ This will:
 ## Architecture
 
 The service uses FastAPI for the API layer and leverages asynchronous processing for handling concurrent requests. Face detection is performed using either MTCNN or MediaPipe, and face embeddings are generated using the InceptionResnetV1 model. The comparison is based on cosine similarity between embeddings.
+
+## Troubleshooting
+
+### MediaPipe Errors
+
+If you encounter errors with MediaPipe like:
+
+```
+ValueError: Graph has errors: Packet type mismatch on a calculator receiving from stream "image"
+```
+
+This is usually related to image format compatibility. Try the following:
+
+1. Make sure your images are valid and not corrupted
+2. Ensure image dimensions are at least 20x20 pixels
+3. Check that the Docker container has all required system libraries (included in the Dockerfile)
+4. Try the `/compare` endpoint instead, which uses MTCNN
+
+### Performance Issues
+
+If you're experiencing slow performance:
+
+1. Ensure you're running with GPU support if available
+2. Try adjusting the number of workers in the Dockerfile
+3. Check resource usage (memory, CPU) and ensure sufficient resources are available
+4. Try smaller image sizes to reduce processing time
+
+### Docker Issues
+
+If you have problems with the Docker container:
+
+1. Make sure Docker has sufficient resources allocated
+2. For GPU support, ensure NVIDIA Docker runtime is properly set up
+3. Check Docker logs for detailed error messages
 
 ## License
 

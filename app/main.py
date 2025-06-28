@@ -229,7 +229,23 @@ def get_face_with_mediapipe(image: Image.Image) -> tuple[torch.Tensor, FaceDetec
     
     # Convert PIL to OpenCV format
     cv2_image = pil_to_cv2(image)
+    
+    # Make sure we're working with RGB format for MediaPipe
+    # MediaPipe expects RGB format, so we convert directly without another conversion
     rgb_image = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
+    
+    # MediaPipe needs valid images with correct shape and dtype
+    if rgb_image.shape[0] == 0 or rgb_image.shape[1] == 0:
+        # Return None if image dimensions are invalid
+        return None, FaceDetectionMetrics(
+            face_detected=False,
+            detection_time_ms=(time.time() - start_time) * 1000,
+            face_coordinates=None,
+            confidence_score=None
+        )
+    
+    # Ensure the image is in the right format for MediaPipe (uint8)
+    rgb_image = rgb_image.astype(np.uint8)
     
     # Detect faces with MediaPipe
     results = face_detection.process(rgb_image)
@@ -399,27 +415,84 @@ async def compare_faces(payload: CompareRequest):
 async def compare_faces_mediapipe(payload: CompareRequest):
     total_start_time = time.time()
     
-    # Decode images asynchronously
-    loop = asyncio.get_event_loop()
-    img1, img2 = await asyncio.gather(
-        loop.run_in_executor(executor, decode_image, payload.image1_base64),
-        loop.run_in_executor(executor, decode_image, payload.image2_base64)
-    )
+    try:
+        # Decode images asynchronously
+        loop = asyncio.get_event_loop()
+        img1, img2 = await asyncio.gather(
+            loop.run_in_executor(executor, decode_image, payload.image1_base64),
+            loop.run_in_executor(executor, decode_image, payload.image2_base64)
+        )
 
-    # Face detection with MediaPipe in parallel
-    face_detection_tasks = await asyncio.gather(
-        get_face_with_mediapipe_async(img1),
-        get_face_with_mediapipe_async(img2)
-    )
+        # Validate image dimensions
+        for i, img in enumerate([img1, img2], 1):
+            if img.size[0] < 20 or img.size[1] < 20:
+                raise HTTPException(
+                    status_code=422, 
+                    detail=f"Image {i} is too small ({img.size[0]}x{img.size[1]}). Minimum size is 20x20 pixels."
+                )
+
+        # Face detection with MediaPipe in parallel
+        face_detection_tasks = await asyncio.gather(
+            get_face_with_mediapipe_async(img1),
+            get_face_with_mediapipe_async(img2),
+            return_exceptions=True
+        )
+        
+        # Handle potential exceptions from face detection
+        for i, result in enumerate(face_detection_tasks, 1):
+            if isinstance(result, Exception):
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Error processing image {i}: {str(result)}"
+                )
+        
+        face1, face1_metrics = face_detection_tasks[0]
+        face2, face2_metrics = face_detection_tasks[1]
+        
+        # Check if faces were detected
+        if face1 is None:
+            raise HTTPException(status_code=422, detail="No face detected in image 1.")
+        if face2 is None:
+            raise HTTPException(status_code=422, detail="No face detected in image 2.")
+            
+        # Process embeddings in batch for better GPU utilization
+        embeddings, embedding_metrics = await loop.run_in_executor(
+            executor, get_embeddings_mediapipe_batch_with_metrics, [face1, face2]
+        )
+        
+        emb1, emb1_metrics = embeddings[0], embedding_metrics[0]
+        emb2, emb2_metrics = embeddings[1], embedding_metrics[1]
+
+        # Compute similarity
+        threshold = 0.6  # Adjustable
+        comparison_metrics = await compute_similarity_with_metrics_async(emb1, emb2, threshold)
+        
+        # Final similarity and match decision
+        similarity = comparison_metrics.cosine_similarity
+        match = similarity > (1 - threshold)
+        
+        total_processing_time = (time.time() - total_start_time) * 1000  # Convert to milliseconds
+
+        return CompareResponse(
+            similarity=similarity,
+            match=match,
+            total_processing_time_ms=total_processing_time,
+            image1_metrics=face1_metrics,
+            image2_metrics=face2_metrics,
+            embedding1_metrics=emb1_metrics,
+            embedding2_metrics=emb2_metrics,
+            comparison_metrics=comparison_metrics
+        )
     
-    face1, face1_metrics = face_detection_tasks[0]
-    face2, face2_metrics = face_detection_tasks[1]
-    
-    # Check if faces were detected
-    if face1 is None:
-        raise HTTPException(status_code=422, detail="No face detected in image 1.")
-    if face2 is None:
-        raise HTTPException(status_code=422, detail="No face detected in image 2.")
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        # Log and convert other exceptions to HTTP exceptions
+        print(f"Error in /mediapipe endpoint: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
     # Process embeddings in batch for better GPU utilization
     embeddings, embedding_metrics = await loop.run_in_executor(
