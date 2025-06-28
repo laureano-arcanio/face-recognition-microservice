@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+facenet-pytorch
+torch
+torchvision
+python-multipart
+Pillow
+numpy
+mediapipe
+opencv-python
